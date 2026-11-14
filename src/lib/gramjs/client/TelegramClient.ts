@@ -98,6 +98,9 @@ const DEFAULT_WEBDOCUMENT_DC_ID = 4;
 const EXPORTED_SENDER_RECONNECT_TIMEOUT = 1000; // 1 sec
 const EXPORTED_SENDER_RELEASE_TIMEOUT = 30000; // 30 sec
 const WEBDOCUMENT_REQUEST_PART_SIZE = 131072; // 128kb
+const WEBDOCUMENT_MAX_SIZE = 10 * 1024 * 1024; // 10 MB
+const WEBDOCUMENT_DOWNLOAD_TIMEOUT = 30000; // 30 sec
+const WEBDOCUMENT_SIZE_LIMIT_ERROR = 'Web document exceeds the size limit';
 const STATIC_MAP_REQUEST_PART_SIZE = 524288; // 512kb
 
 const PING_INTERVAL = 3000; // 3 sec
@@ -954,7 +957,7 @@ class TelegramClient {
     } else if (media instanceof Api.MessageMediaDocument || media instanceof Api.Document) {
       return this._downloadDocument(media, args);
     } else if (media instanceof Api.WebDocument || media instanceof Api.WebDocumentNoProxy) {
-      return this._downloadWebDocument(media);
+      return this._downloadWebDocument(media, args.progressCallback);
     }
     return undefined;
   }
@@ -1156,51 +1159,139 @@ class TelegramClient {
     );
   }
 
-  async _downloadWebDocument(media: Api.TypeWebDocument) {
-    if (media instanceof Api.WebDocumentNoProxy) {
-      const arrayBuff = await fetch(media.url).then((res) => res.arrayBuffer());
-      return new Uint8Array(arrayBuff);
+  async _downloadWebDocument(
+    media: Api.TypeWebDocument, progressCallback?: DownloadMediaParams['progressCallback'],
+  ) {
+    if (!Number.isSafeInteger(media.size) || media.size <= 0) {
+      throw new Error('Invalid web document size');
+    }
+    if (media.size > WEBDOCUMENT_MAX_SIZE) {
+      throw new Error(WEBDOCUMENT_SIZE_LIMIT_ERROR);
     }
 
+    const abortController = new AbortController();
+    const timeoutId = setTimeout(() => abortController.abort(), WEBDOCUMENT_DOWNLOAD_TIMEOUT);
+
     try {
-      const buff = [];
-      let offset = 0;
+      progressCallback?.(0);
 
-      while (true) {
-        const downloaded = new Api.upload.GetWebFile({
-          location: new Api.InputWebFileLocation({
-            url: media.url,
-            accessHash: media.accessHash,
-          }),
-          offset,
-          limit: WEBDOCUMENT_REQUEST_PART_SIZE,
-        });
-
-        const sender = await this._borrowExportedSender(await this.getWebfileDcId());
-
-        if (!sender) {
-          throw new Error('Failed to obtain sender');
-        }
-        const res = (await sender.send(downloaded))!;
-        this.releaseExportedSender(sender);
-        offset += WEBDOCUMENT_REQUEST_PART_SIZE;
-        if (res.bytes.length) {
-          buff.push(res.bytes);
-          if (res.bytes.length < WEBDOCUMENT_REQUEST_PART_SIZE) {
-            break;
+      if (media instanceof Api.WebDocumentNoProxy) {
+        const response = await fetch(media.url, { signal: abortController.signal });
+        const contentLengthHeader = response.headers.get('Content-Length');
+        if (contentLengthHeader !== null) {
+          const contentLength = Number(contentLengthHeader);
+          if (!Number.isSafeInteger(contentLength) || contentLength < 0) {
+            throw new Error('Invalid web document content length');
           }
+          if (contentLength > media.size) {
+            throw new Error(WEBDOCUMENT_SIZE_LIMIT_ERROR);
+          }
+        }
+
+        if (!response.body) return new Uint8Array(0);
+
+        const buffer = new Uint8Array(media.size);
+        const reader = response.body.getReader();
+        let downloadedSize = 0;
+
+        while (true) {
+          if (progressCallback?.isCanceled) {
+            abortController.abort();
+            throw new Error('USER_CANCELED');
+          }
+
+          const { done, value } = await reader.read();
+          if (done) break;
+
+          const nextDownloadedSize = downloadedSize + value.length;
+          if (nextDownloadedSize > media.size) {
+            abortController.abort();
+            throw new Error(WEBDOCUMENT_SIZE_LIMIT_ERROR);
+          }
+
+          buffer.set(value, downloadedSize);
+          downloadedSize = nextDownloadedSize;
+          progressCallback?.(downloadedSize / media.size);
+        }
+
+        return downloadedSize === buffer.length ? buffer : buffer.slice(0, downloadedSize);
+      }
+
+      try {
+        const buffer = new Uint8Array(media.size);
+        let offset = 0;
+        let fullSize: number | undefined;
+
+        while (true) {
+          if (progressCallback?.isCanceled) {
+            abortController.abort();
+            throw new Error('USER_CANCELED');
+          }
+
+          const downloaded = new Api.upload.GetWebFile({
+            location: new Api.InputWebFileLocation({
+              url: media.url,
+              accessHash: media.accessHash,
+            }),
+            offset,
+            limit: WEBDOCUMENT_REQUEST_PART_SIZE,
+          });
+
+          let sender: MTProtoSender | undefined;
+          try {
+            sender = await this.getSender(
+              await this.getWebfileDcId(), undefined, undefined, abortController.signal,
+            );
+
+            if (!sender) {
+              throw new Error('Failed to obtain sender');
+            }
+            const res = (await sender.send(downloaded, abortController.signal))!;
+
+            if (!Number.isSafeInteger(res.size) || res.size <= 0) {
+              throw new Error('Invalid web document response size');
+            }
+            if (res.size > media.size || res.size > WEBDOCUMENT_MAX_SIZE) {
+              abortController.abort();
+              throw new Error(WEBDOCUMENT_SIZE_LIMIT_ERROR);
+            }
+            if (fullSize !== undefined && res.size !== fullSize) {
+              throw new Error('Web document size changed during download');
+            }
+
+            fullSize = res.size;
+            const nextOffset = offset + res.bytes.length;
+            if (nextOffset > fullSize) {
+              abortController.abort();
+              throw new Error(WEBDOCUMENT_SIZE_LIMIT_ERROR);
+            }
+            if (!res.bytes.length && nextOffset < fullSize) {
+              throw new Error('Web document download ended before the declared size');
+            }
+
+            if (res.bytes.length) {
+              buffer.set(res.bytes, offset);
+              offset = nextOffset;
+              progressCallback?.(offset / fullSize);
+            }
+          } finally {
+            if (sender) this.releaseExportedSender(sender);
+          }
+
+          if (offset === fullSize) break;
+        }
+        return offset === buffer.length ? buffer : buffer.slice(0, offset);
+      } catch (err: unknown) {
+        // Nothing is returned, so an empty file is not cached and the next request tries again
+        if (err instanceof RPCError && err.errorMessage === 'WEBFILE_NOT_AVAILABLE') {
+          return undefined;
         } else {
-          break;
+          throw err;
         }
       }
-      return concat(...buff);
-    } catch (err: unknown) {
-      // Nothing is returned, so an empty file is not cached and the next request tries again
-      if (err instanceof RPCError && err.errorMessage === 'WEBFILE_NOT_AVAILABLE') {
-        return undefined;
-      } else {
-        throw err;
-      }
+    } finally {
+      clearTimeout(timeoutId);
+      abortController.abort();
     }
   }
 
