@@ -10,10 +10,13 @@ import {
   ACCOUNT_SLOT, getAccountsInfo, getAccountSlotUrl, getFirstLoggedInAccountSlot, loadSlotSession,
 } from './multiaccount';
 import {
-  completeWebLogin, getPendingWebLogin, parseInitialLocationHash, parseLocationHash, setPendingWebLogin,
+  completeWebLogin, getPendingWebLogin, parseInitialLocationHash, parseLocationHash, type PendingWebLogin,
+  setPendingWebLogin,
 } from './routing';
 import { checkSessionLocked, hasStoredSession } from './sessions';
 import { handoffWebLogin } from './webLoginHandoff';
+
+let validatingWebLogin: PendingWebLogin | undefined;
 
 export async function resolveWebLogin() {
   const request = getPendingWebLogin()!;
@@ -68,7 +71,11 @@ export function finishWebLogin(userId: string) {
     return;
   }
   if (request.token) {
-    void callApi('cancelWebTokenAuthorization', { token: request.token }).catch(() => undefined);
+    if (validatingWebLogin === request) return;
+
+    validatingWebLogin = request;
+    void validateWebLogin(request, userId);
+    return;
   }
   completeWebLogin();
   const destination = parseLocationHash(userId);
@@ -79,4 +86,18 @@ export function finishWebLogin(userId: string) {
     delete parameters.tgaddr;
     processDeepLink(link, { type: 'inner' });
   }
+}
+
+async function validateWebLogin(request: PendingWebLogin, userId: string) {
+  const isTokenValid = await callApi('cancelWebTokenAuthorization', { token: request.token! })
+    .catch(() => undefined);
+  if (validatingWebLogin === request) validatingWebLogin = undefined;
+  if (getPendingWebLogin() !== request) return;
+  if (isTokenValid !== true) {
+    rejectWebLogin(true);
+    return;
+  }
+
+  request.token = undefined;
+  finishWebLogin(userId);
 }
