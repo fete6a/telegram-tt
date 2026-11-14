@@ -16,9 +16,13 @@ const CACHE_TTL = 5 * 24 * 60 * 60 * 1000; // 5 days
 const ACCESS_THROTTLE = 24 * 60 * 60 * 1000; // 1 day
 const CLEANUP_INTERVAL = 1 * 60 * 60 * 1000; // 1 hour
 
-const CLEARABLE_CACHE_NAMES = [MEDIA_CACHE_NAME, MEDIA_CACHE_NAME_AVATARS, MEDIA_PROGRESSIVE_CACHE_NAME];
+const MEDIA_CACHE_NAMES = [MEDIA_CACHE_NAME, MEDIA_CACHE_NAME_AVATARS];
+const LEGACY_MEDIA_CACHE_NAMES = ['tt-media', 'tt-media-avatars'];
+const CLEARABLE_CACHE_NAMES = [...MEDIA_CACHE_NAMES, MEDIA_PROGRESSIVE_CACHE_NAME];
 const CACHE_KEY_BASE = `${self.location.origin}/`;
+const MEDIA_CACHE_KEY_PREFIX = 'media-cache_';
 
+void clearLegacyMediaCaches().catch(() => undefined);
 void cleanup(CLEARABLE_CACHE_NAMES).catch(() => undefined);
 setInterval(() => {
   void cleanup(CLEARABLE_CACHE_NAMES).catch(() => undefined);
@@ -87,7 +91,7 @@ async function fetchFromCache(
   }
 
   try {
-    const request = buildCacheRequest(key);
+    const request = buildCacheRequest(resolvedCacheName, key);
     const cache = await cacheApi.open(resolvedCacheName);
     const response = await cache.match(request);
     if (!response) {
@@ -166,7 +170,7 @@ async function saveToCache(
     const cacheData = typeof data === 'string' || data instanceof Blob || data instanceof ArrayBuffer
       ? data
       : JSON.stringify(data);
-    const request = buildCacheRequest(key);
+    const request = buildCacheRequest(resolvedCacheName, key);
     const response = new Response(cacheData);
     response.headers.set(LAST_ACCESS_HEADER, Date.now().toString());
     const cache = await cacheApi.open(resolvedCacheName);
@@ -200,7 +204,7 @@ async function removeFromCache(resolvedCacheName: string, key: string) {
     }
 
     const cache = await cacheApi.open(resolvedCacheName);
-    return await cache.delete(buildCacheRequest(key));
+    return await cache.delete(buildCacheRequest(resolvedCacheName, key));
   } catch (err) {
     // eslint-disable-next-line no-console
     console.warn(err);
@@ -273,6 +277,13 @@ export async function purgePasscodeCaches() {
   await Promise.all(cacheNames.filter(isPasscodeProtectedCache).map((cacheName) => cacheApi.delete(cacheName)));
 }
 
+async function clearLegacyMediaCaches() {
+  if (!cacheApi) return;
+
+  const cacheNames = await cacheApi.keys();
+  await Promise.all(cacheNames.filter(isLegacyMediaCache).map((cacheName) => cacheApi.delete(cacheName)));
+}
+
 async function getAccountScopedCacheNames(cacheName: string) {
   if (!cacheApi) return [];
 
@@ -285,10 +296,20 @@ async function getAccountScopedCacheNames(cacheName: string) {
   }
 }
 
-function buildCacheRequest(key: string) {
-  // To avoid the error "Request scheme 'webdocument' is unsupported"
-  const normalizedKey = key.replace(/:/g, '_');
+function buildCacheRequest(cacheName: string, key: string) {
+  // Keep media keys opaque and avoid unsupported schemes in legacy cache requests
+  const normalizedKey = isMediaCache(cacheName)
+    ? `${MEDIA_CACHE_KEY_PREFIX}${encodeURIComponent(key)}`
+    : key.replace(/:/g, '_');
   return new Request(new URL(normalizedKey, CACHE_KEY_BASE));
+}
+
+function isMediaCache(cacheName: string) {
+  return MEDIA_CACHE_NAMES.some((name) => cacheName === name || cacheName.startsWith(`${name}_`));
+}
+
+function isLegacyMediaCache(cacheName: string) {
+  return LEGACY_MEDIA_CACHE_NAMES.some((name) => cacheName === name || cacheName.startsWith(`${name}_`));
 }
 
 function isPasscodeProtectedCache(cacheName: string) {

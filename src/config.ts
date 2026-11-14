@@ -55,8 +55,8 @@ export const GLOBAL_STATE_CACHE_CUSTOM_EMOJI_LIMIT = 150;
 export const IS_SCREEN_LOCKED_CACHE_KEY = 'tt-is-screen-locked';
 
 export const MEDIA_CACHE_DISABLED = false;
-export const MEDIA_CACHE_NAME = 'tt-media';
-export const MEDIA_CACHE_NAME_AVATARS = 'tt-media-avatars';
+export const MEDIA_CACHE_NAME = 'tt-media-v2';
+export const MEDIA_CACHE_NAME_AVATARS = 'tt-media-avatars-v2';
 export const MEDIA_PROGRESSIVE_CACHE_DISABLED = false;
 export const MEDIA_PROGRESSIVE_CACHE_NAME = 'tt-media-progressive';
 export const MEDIA_CACHE_MAX_BYTES = 512 * 1024; // 512 KB
