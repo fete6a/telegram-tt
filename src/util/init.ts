@@ -19,11 +19,10 @@ import { ACCOUNT_SLOT } from './multiaccount';
 import { parseJsonWithBigInt } from './numbers';
 import {
   abortPasscodeDisable,
-  clearLegacyEncryptedSessionIfAllowed,
+  clearLegacyEncryptedSession,
   forgetDek,
   getDek,
   getDekGeneration,
-  hasLegacyEncryptedSession,
   loadPasscodeMeta,
   lockPasscodeSessionStore,
   markPasscodeLocked,
@@ -139,12 +138,18 @@ async function applyPasscodeStateOnBootLocked<T extends GlobalState>(global: T):
     meta = await loadPasscodeMeta();
   }
 
-  const hasLegacy = !meta && Boolean(await hasLegacyEncryptedSession());
+  const hadLegacy = await clearLegacyEncryptedSession();
   if (meta) lockPasscodeSessionStore();
-  if (!meta && !hasLegacy) {
+  if (!meta) {
     forgetDek();
     resetSessionStore();
     localStorage.removeItem(IS_SCREEN_LOCKED_CACHE_KEY);
+
+    if (hadLegacy) {
+      await purgePasscodePlaintext();
+      return clearPasscodeSettings(clearGlobalForLockScreen(global));
+    }
+
     return global.passcode.hasPasscode || global.passcode.isScreenLocked
       ? clearPasscodeSettings(global) : global;
   }
@@ -158,7 +163,6 @@ async function applyPasscodeStateOnBootLocked<T extends GlobalState>(global: T):
       try {
         await restoreMissingSessionsFromVault();
         const globalJson = await readGlobalsVaultForSlot(ACCOUNT_SLOT);
-        if (globalJson) await clearLegacyEncryptedSessionIfAllowed().catch(() => undefined);
         if (localStorage.getItem(IS_SCREEN_LOCKED_CACHE_KEY) === 'false') {
           global = restoreGlobal(global, globalJson);
           isLocked = false;
@@ -182,7 +186,7 @@ async function applyPasscodeStateOnBootLocked<T extends GlobalState>(global: T):
     }
     localStorage.setItem(IS_SCREEN_LOCKED_CACHE_KEY, 'true');
     await Promise.all([
-      purgePasscodePlaintext(hasLegacy),
+      purgePasscodePlaintext(),
       clearPrivatePushNotifications().catch(() => undefined),
     ]);
     if (didMarkLocked && meta) broadcastPasscodeState(undefined, meta.generation);
@@ -202,11 +206,9 @@ async function applyPasscodeStateOnBootLocked<T extends GlobalState>(global: T):
   });
 }
 
-async function purgePasscodePlaintext(shouldPreserveLegacyAccounts = false) {
-  if (!shouldPreserveLegacyAccounts) {
-    clearAllStoredSessions();
-    await removeAllGlobalCaches().catch(logPlaintextPurgeError);
-  }
+async function purgePasscodePlaintext() {
+  clearAllStoredSessions();
+  await removeAllGlobalCaches().catch(logPlaintextPurgeError);
 
   await Promise.all([
     clearPlaintextWallpaperBlobs().catch(logPlaintextPurgeError),

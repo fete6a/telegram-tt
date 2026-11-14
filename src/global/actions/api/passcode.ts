@@ -12,7 +12,7 @@ import { updateFolderManager } from '../../../util/folderManager';
 import { cloneDeep } from '../../../util/iteratees';
 import { clearMemoryCache } from '../../../util/mediaLoader';
 import {
-  ACCOUNT_SLOT, getAccountSlots, getAccountSlotUrl, loadSlotSession,
+  ACCOUNT_SLOT, getAccountSlots, loadSlotSession,
 } from '../../../util/multiaccount';
 import { parseJsonWithBigInt } from '../../../util/numbers';
 import {
@@ -21,16 +21,12 @@ import {
   changePasscode,
   claimPasscodeDisable,
   clearLegacyEncryptedSession,
-  clearLegacyEncryptedSessionIfAllowed,
   clearPlaintextSessionStorage,
-  collectSessionStorageSnapshot,
   commitPasscodeDisable,
   createPasscode,
-  decryptLegacySession,
   forgetDek,
   getDek,
   getDekGeneration,
-  hasLegacyEncryptedSession,
   hasOtherSlotWalletVaultSecrets,
   InvalidPasscodeError,
   listWalletVaultSecrets,
@@ -61,15 +57,12 @@ import {
 import {
   createUnlockPasskey, getPasskeyKek, signalUnknownUnlockPasskey,
 } from '../../../util/passcode/passkey';
-import {
-  enableEncryptedSessionStore,
-  resetSessionStore,
-} from '../../../util/passcode/sessionStore';
+import { resetSessionStore } from '../../../util/passcode/sessionStore';
 import {
   clearPrivatePushNotifications, reconcilePushNotifications, refreshPushNotificationState, suspendPushForPasscode,
 } from '../../../util/pushNotifications';
 import { getPendingWebLogin } from '../../../util/routing';
-import { clearAllStoredSessions, storeSession, updateSessionUserId } from '../../../util/sessions';
+import { clearAllStoredSessions } from '../../../util/sessions';
 import {
   clearLockScreenWallpaperBlobs,
   clearPlaintextWallpaperBlobs,
@@ -78,7 +71,6 @@ import {
   syncLockScreenWallpaperBlobs,
 } from '../../../util/wallpaper/storage';
 import { interruptWebLogin } from '../../../util/webLogin';
-import { handoffWebLogin } from '../../../util/webLoginHandoff';
 import { flushWidgetStorage } from '../../../util/widgetStorage';
 import { closeApi } from '../../../api/gramjs';
 import {
@@ -328,7 +320,7 @@ addActionHandler('lockScreen', async (global): Promise<void> => {
   }
 });
 
-addActionHandler('unlockScreen', async (global, actions, payload): Promise<void> => {
+addActionHandler('unlockScreen', async (global, _actions, payload): Promise<void> => {
   const { passcode } = payload;
   if (global.passcode.isLoading) return;
 
@@ -354,17 +346,6 @@ addActionHandler('unlockScreen', async (global, actions, payload): Promise<void>
         timeoutUntil,
         isLoading: false,
       });
-      return;
-    }
-
-    if (await hasLegacyEncryptedSession()) {
-      if (ACCOUNT_SLOT) {
-        if (!await handoffWebLogin(getAccountSlotUrl(1))) {
-          window.location.replace(getAccountSlotUrl(1));
-        }
-        return;
-      }
-      await unlockLegacySession(passcode);
       return;
     }
 
@@ -710,7 +691,6 @@ async function readGlobalJson() {
   const globalJson = await readGlobalsVaultForSlot(ACCOUNT_SLOT);
   if (!globalJson) return serializeGlobal(cloneDeep(INITIAL_GLOBAL_STATE));
 
-  await clearLegacyEncryptedSessionIfAllowed().catch(() => undefined);
   return globalJson;
 }
 
@@ -718,65 +698,6 @@ function abortUnlock(generation: string, isDataCorrupted?: boolean) {
   forgetDek(generation);
   clearAllStoredSessions();
   setPasscodeSettings({ isLoading: false, isDataCorrupted });
-}
-
-async function unlockLegacySession(passcode: string) {
-  let sessionJson: string;
-  let globalJson: string;
-  let sharedStateJson: string | undefined;
-  try {
-    ({ sessionJson, globalJson, sharedStateJson } = await decryptLegacySession(passcode));
-  } catch (err) {
-    if (err instanceof InvalidPasscodeError) {
-      const global = getGlobal();
-      const invalidAttempt = buildInvalidAttempt(global.passcode.invalidAttemptsCount);
-      setPasscodeSettings({
-        ...invalidAttempt,
-        isLoading: false,
-      });
-    } else {
-      setPasscodeSettings({ isDataCorrupted: true });
-    }
-    return;
-  }
-
-  const sharedState = parseLegacySharedState(sharedStateJson);
-  let migrationGeneration: string | undefined;
-  try {
-    const legacyGlobal = parseJsonWithBigInt<GlobalState>(globalJson);
-    migrateCache(legacyGlobal, cloneDeep(INITIAL_GLOBAL_STATE));
-    if (sharedState) legacyGlobal.sharedState = sharedState;
-    if (sharedState) await cacheSharedState(sharedState);
-    const session = parseJsonWithBigInt<Parameters<typeof storeSession>[0] & { userId?: string }>(sessionJson);
-    enableEncryptedSessionStore(collectSessionStorageSnapshot());
-    await storeSession(session);
-    if (session.userId) await updateSessionUserId(session.userId);
-
-    const migration = await requestPasscodeStateLock(async () => {
-      if (await loadPasscodeMeta()) return undefined;
-
-      localStorage.setItem(IS_SCREEN_LOCKED_CACHE_KEY, 'enabling');
-      const context = await createPasscode(passcode, await collectGlobalSnapshots(legacyGlobal));
-      migrationGeneration = context.generation;
-      await finishPasscodeSetup(context);
-      await clearLegacyEncryptedSessionIfAllowed().catch(() => undefined);
-      return true;
-    });
-    if (!migration) {
-      window.location.reload();
-      return;
-    }
-  } catch (err) {
-    if (await failClosedAfterPasscodeSetup(migrationGeneration)) {
-      window.location.reload();
-      return;
-    }
-    resetSessionStore();
-    setPasscodeSettings({ isDataCorrupted: true });
-    return;
-  }
-
-  await applyUnlockedState(globalJson, sharedState);
 }
 
 async function failClosedAfterPasscodeSetup(expectedGeneration?: string) {
@@ -839,16 +760,6 @@ async function syncSelectedLockScreenWallpaperBlobs(global: GlobalState) {
 function logPasscodeWarning(err: unknown) {
   // eslint-disable-next-line no-console
   console.warn(err);
-}
-
-function parseLegacySharedState(sharedStateJson?: string): GlobalState['sharedState'] | undefined {
-  if (!sharedStateJson) return undefined;
-
-  try {
-    return parseJsonWithBigInt<GlobalState['sharedState']>(sharedStateJson);
-  } catch (err) {
-    return undefined;
-  }
 }
 
 async function collectGlobalSnapshots(currentGlobal: GlobalState) {

@@ -2,7 +2,6 @@ import {
   DC_IDS,
   SESSION_ACCOUNT_PREFIX,
   SESSION_LEGACY_USER_KEY,
-  SHOULD_DELETE_LEGACY_PASSCODE_DATA,
 } from '../../config';
 import { PASSCODE_IDB_STORE } from '../browser/idb';
 import {
@@ -41,10 +40,10 @@ const WALLET_VAULT_KEY_PREFIX = 'walletVault_';
 const PASSCODE_SESSION_LOCK_NAME = 'tt-passcode-session';
 const PASSCODE_GLOBALS_LOCK_NAME = 'tt-passcode-globals';
 
-const LEGACY_SALT = 'harder better faster stronger';
 const LEGACY_SESSION_KEY = 'sessionEncrypted';
 const LEGACY_GLOBAL_KEY = 'globalEncrypted';
 const LEGACY_SHARED_STATE_KEY = 'sharedStateEncrypted';
+const LEGACY_VAULT_KEYS = [LEGACY_SESSION_KEY, LEGACY_GLOBAL_KEY, LEGACY_SHARED_STATE_KEY];
 
 type GlobalSnapshot = {
   globalJson: string;
@@ -594,51 +593,10 @@ export async function clearPasscodeStore() {
   });
 }
 
-export async function hasLegacyEncryptedSession() {
-  return Boolean(await PASSCODE_IDB_STORE.get(LEGACY_SESSION_KEY));
-}
-
-export async function decryptLegacySession(passcode: string) {
-  const passcodeHash = await legacySha256(passcode);
-
-  const [sessionEncrypted, globalEncrypted, sharedStateEncrypted] = await Promise.all([
-    PASSCODE_IDB_STORE.get<number[]>(LEGACY_SESSION_KEY),
-    PASSCODE_IDB_STORE.get<number[]>(LEGACY_GLOBAL_KEY),
-    PASSCODE_IDB_STORE.get<number[]>(LEGACY_SHARED_STATE_KEY),
-  ]);
-
-  if (!sessionEncrypted || !globalEncrypted) {
-    throw new PasscodeDataCorruptedError('[passcode] Missing legacy encrypted fields');
-  }
-
-  const key = await importAesKey(passcodeHash);
-
-  let sessionJson: string;
-  let globalJson: string;
-  try {
-    const [sessionBuffer, globalBuffer] = await Promise.all([
-      aesDecrypt(toArrayBuffer(sessionEncrypted), key),
-      aesDecrypt(toArrayBuffer(globalEncrypted), key),
-    ]);
-    const sharedStateBuffer = sharedStateEncrypted
-      ? await aesDecrypt(toArrayBuffer(sharedStateEncrypted), key).catch(() => undefined) : undefined;
-    sessionJson = new TextDecoder().decode(sessionBuffer);
-    globalJson = new TextDecoder().decode(globalBuffer);
-    const sharedStateJson = sharedStateBuffer ? new TextDecoder().decode(sharedStateBuffer) : undefined;
-    return { sessionJson, globalJson, sharedStateJson };
-  } catch (err) {
-    throw new InvalidPasscodeError('[passcode] Invalid legacy passcode');
-  }
-}
-
-export function clearLegacyEncryptedSession() {
-  return PASSCODE_IDB_STORE.delMany([LEGACY_SESSION_KEY, LEGACY_GLOBAL_KEY, LEGACY_SHARED_STATE_KEY]);
-}
-
-export async function clearLegacyEncryptedSessionIfAllowed() {
-  if (!SHOULD_DELETE_LEGACY_PASSCODE_DATA) return;
-
-  await clearLegacyEncryptedSession();
+export async function clearLegacyEncryptedSession() {
+  const legacyValues = await PASSCODE_IDB_STORE.getMany(LEGACY_VAULT_KEYS);
+  await PASSCODE_IDB_STORE.delMany(LEGACY_VAULT_KEYS);
+  return legacyValues.some((value) => value !== undefined);
 }
 
 async function decryptSessionsVault() {
@@ -983,10 +941,6 @@ function deriveKekFromPasscode(passcode: string, salt: Uint8Array<ArrayBuffer>, 
 
 function importAesKey(rawKey: ArrayBuffer) {
   return crypto.subtle.importKey('raw', rawKey, 'AES-GCM', false, ['encrypt', 'decrypt']);
-}
-
-function legacySha256(plaintext: string) {
-  return crypto.subtle.digest('SHA-256', new TextEncoder().encode(`${plaintext}${LEGACY_SALT}`));
 }
 
 function toArrayBuffer(data: number[]) {

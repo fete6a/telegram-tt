@@ -17,11 +17,9 @@ import { IS_INSTALL_PROMPT_SUPPORTED, IS_IOS, PLATFORM_ENV } from '../util/brows
 import buildClassName from '../util/buildClassName';
 import { setupBeforeInstallPrompt } from '../util/installPrompt';
 import { ACCOUNT_SLOT, getAccountSlotUrl, getFirstLoggedInAccountSlot } from '../util/multiaccount';
-import { hasLegacyEncryptedSession } from '../util/passcode';
 import { getInitialLocationHash, getPendingWebLogin } from '../util/routing';
-import { checkSessionLocked, hasStoredSession } from '../util/sessions';
+import { hasStoredSession } from '../util/sessions';
 import { getWallpaperBaseColor } from '../util/wallpaper';
-import { handoffWebLogin } from '../util/webLoginHandoff';
 import { updateSizes } from '../util/windowSize';
 
 import useTauriDrag from '../hooks/tauri/useTauriDrag';
@@ -98,14 +96,6 @@ const App = ({
         const url = getAccountSlotUrl(firstLoggedInAccountSlot);
         window.location.href = `${url}#${hash || 'login'}`;
       }
-    }
-
-    if (checkSessionLocked() && ACCOUNT_SLOT) {
-      void hasLegacyEncryptedSession().then(async (hasLegacySession) => {
-        if (hasLegacySession && !await handoffWebLogin(getAccountSlotUrl(1))) {
-          window.location.replace(getAccountSlotUrl(1));
-        }
-      }).catch(() => undefined);
     }
   }, []);
 
