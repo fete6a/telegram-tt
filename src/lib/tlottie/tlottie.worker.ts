@@ -31,6 +31,7 @@ interface TLottieExports {
 const HIGH_PRIORITY_MAX_FPS = 60;
 const LOW_PRIORITY_MAX_FPS = 30;
 const RGBA_BYTES_PER_PIXEL = 4;
+const MAX_ANIMATION_DATA_LENGTH = 5 * 1024 * 1024;
 // This module uses `i8x16.splat` and `i8x16.popcnt` to detect SIMD support
 const SIMD_TEST = new Uint8Array([
   0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00,
@@ -134,20 +135,54 @@ async function changeData(
 async function fetchAnimationData(tgsUrl: string) {
   const response = await fetch(tgsUrl);
   const contentType = response.headers.get('Content-Type');
+  const { body } = response;
 
-  // Support deprecated JSON format cached locally
-  if (contentType?.startsWith('text/')) {
-    return new Uint8Array(await response.arrayBuffer());
-  }
-
-  if (!response.body) {
+  if (!body) {
     return new Uint8Array(0);
   }
 
+  // Support deprecated JSON format cached locally
+  if (contentType?.startsWith('text/')) {
+    return readAnimationData(body);
+  }
+
   // Prefer native gzip decompression over library. This use case has ~same speed
-  const decompressionStream = response.body.pipeThrough(new DecompressionStream('gzip'));
-  const result = await new Response(decompressionStream).arrayBuffer();
-  return new Uint8Array(result);
+  const decompressionStream = body.pipeThrough(new DecompressionStream('gzip'));
+  return readAnimationData(decompressionStream);
+}
+
+async function readAnimationData(stream: ReadableStream<Uint8Array>) {
+  const reader = stream.getReader();
+  const chunks: Uint8Array[] = [];
+  let length = 0;
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) {
+        break;
+      }
+
+      length += value.length;
+      if (length > MAX_ANIMATION_DATA_LENGTH) {
+        await reader.cancel();
+        throw new Error('[TLottie] Animation data is too large');
+      }
+
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+
+  const result = new Uint8Array(length);
+  let offset = 0;
+  for (const chunk of chunks) {
+    result.set(chunk, offset);
+    offset += chunk.length;
+  }
+
+  return result;
 }
 
 function createInstance(animationData: Uint8Array, fitzModifier?: EmojiFitzModifier) {
