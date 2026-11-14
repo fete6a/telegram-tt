@@ -61,21 +61,20 @@ function useWebAppFrame(
   const pendingEventsRef = useRef<WebAppOutboundEvent[]>([]);
   const lastFrameSizeRef = useRef<{ width: number; height: number; isResizing?: boolean }>();
   const windowSize = useWindowSize();
-  const isSameOrigin = webApp?.isSameOrigin;
-  const webAppOrigin = isSameOrigin ? getWebAppOrigin(webApp.url) : undefined;
+  const webAppOrigin = webApp ? getWebAppOrigin(webApp.url) : undefined;
 
   const flushPendingEvents = useCallback(() => {
     const frame = ref.current;
-    if (!frame?.contentWindow || (isSameOrigin && !webAppOrigin)) return;
+    if (!frame?.contentWindow || !webAppOrigin) return;
     // The initial `about:blank` document inherits the parent's origin
     if (getIsFrameBlank(frame)) return;
 
     const events = pendingEventsRef.current;
     pendingEventsRef.current = [];
     events.forEach((event) => {
-      frame.contentWindow!.postMessage(JSON.stringify(event), webAppOrigin || '*');
+      frame.contentWindow!.postMessage(JSON.stringify(event), webAppOrigin);
     });
-  }, [isSameOrigin, ref, webAppOrigin]);
+  }, [ref, webAppOrigin]);
 
   useEffect(() => {
     if (!ref.current || !isOpen) return undefined;
@@ -94,10 +93,10 @@ function useWebAppFrame(
   }, [onLoad, ref, isOpen, flushPendingEvents]);
 
   const sendEvent = useCallback((event: WebAppOutboundEvent) => {
-    if (isSameOrigin && !webAppOrigin) return;
+    if (!webAppOrigin) return;
     pendingEventsRef.current.push(event);
     flushPendingEvents();
-  }, [isSameOrigin, webAppOrigin, flushPendingEvents]);
+  }, [webAppOrigin, flushPendingEvents]);
 
   const sendFullScreenChanged = useCallback((value: boolean) => {
     sendEvent({
@@ -183,7 +182,7 @@ function useWebAppFrame(
       return;
     }
 
-    if ((isSameOrigin && !webAppOrigin) || !isMessageFromIframe(event, ref.current, webAppOrigin)) {
+    if (!webAppOrigin || !isMessageFromIframe(event, ref.current, webAppOrigin)) {
       return;
     }
 

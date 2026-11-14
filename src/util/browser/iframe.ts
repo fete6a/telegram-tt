@@ -47,7 +47,8 @@ export function buildWebAppAllowAttribute(permissions?: BotAppPermissions, origi
 
 export function getWebAppOrigin(url: string) {
   try {
-    return new URL(url).origin;
+    const { origin } = new URL(url);
+    return origin !== 'null' ? origin : undefined;
   } catch (err) {
     return undefined;
   }
