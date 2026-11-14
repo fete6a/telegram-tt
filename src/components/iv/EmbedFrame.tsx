@@ -7,6 +7,8 @@ import buildStyle from '../../util/buildStyle';
 import { extractInstantViewEmbedUrl } from '../../util/instantViewEmbed';
 import { isLiteralObject } from '../../util/iteratees';
 
+import useWindow from '../../hooks/useWindow';
+
 import styles from './RichContent.module.scss';
 
 type OwnProps = {
@@ -23,7 +25,11 @@ type EmbedFrameResizeEvent = {
 
 type EmbedFrameEvent = EmbedFrameResizeEvent;
 
-const EmbedFrame = ({ block, title }: OwnProps) => {
+// Long-form embeds can span many screens, but larger frames create disproportionate layout work
+const MAX_EMBED_FRAME_HEIGHT_PX = 10_000;
+
+function EmbedFrame({ block, title }: OwnProps) {
+  const renderingWindow = useWindow();
   const frameRef = useRef<HTMLIFrameElement>();
   const [frameHeight, setFrameHeight] = useState<number>();
 
@@ -32,6 +38,9 @@ const EmbedFrame = ({ block, title }: OwnProps) => {
   }, [block.html, block.url]);
 
   useEffect(() => {
+    let pendingFrameHeight: number | undefined;
+    let resizeAnimationFrame: number | undefined;
+
     function handleMessage(event: MessageEvent<string>) {
       if (!isMessageFromIframe(event, frameRef.current)) {
         return;
@@ -46,7 +55,7 @@ const EmbedFrame = ({ block, title }: OwnProps) => {
 
         switch (data.eventType) {
           case 'resize_frame': {
-            setFrameHeight(data.eventData.height);
+            scheduleFrameResize(data.eventData.height);
             break;
           }
           default:
@@ -57,15 +66,33 @@ const EmbedFrame = ({ block, title }: OwnProps) => {
       }
     }
 
-    window.addEventListener('message', handleMessage);
-    return () => window.removeEventListener('message', handleMessage);
-  }, []);
+    function scheduleFrameResize(height: number) {
+      pendingFrameHeight = height;
+      if (resizeAnimationFrame !== undefined) {
+        return;
+      }
+
+      resizeAnimationFrame = renderingWindow.requestAnimationFrame(() => {
+        resizeAnimationFrame = undefined;
+        setFrameHeight(pendingFrameHeight!);
+        pendingFrameHeight = undefined;
+      });
+    }
+
+    renderingWindow.addEventListener('message', handleMessage);
+    return () => {
+      renderingWindow.removeEventListener('message', handleMessage);
+      if (resizeAnimationFrame !== undefined) {
+        renderingWindow.cancelAnimationFrame(resizeAnimationFrame);
+      }
+    };
+  }, [renderingWindow]);
 
   if (!embedUrl) {
     return undefined;
   }
 
-  const height = frameHeight || block.height;
+  const height = frameHeight ?? parseEmbedFrameHeight(block.height);
   const style = buildStyle(
     block.width !== undefined && `width: ${block.width}px`,
     height !== undefined && `height: ${height}px`,
@@ -84,7 +111,7 @@ const EmbedFrame = ({ block, title }: OwnProps) => {
       style={style}
     />
   );
-};
+}
 
 export default memo(EmbedFrame);
 
@@ -95,8 +122,8 @@ function parseEmbedFrameEvent(data: unknown): EmbedFrameEvent | undefined {
 
   switch (data.eventType) {
     case 'resize_frame': {
-      const height = data.eventData?.height;
-      if (typeof height !== 'number' || !Number.isFinite(height) || height <= 0) {
+      const height = parseEmbedFrameHeight(data.eventData?.height);
+      if (height === undefined) {
         return undefined;
       }
 
@@ -108,4 +135,12 @@ function parseEmbedFrameEvent(data: unknown): EmbedFrameEvent | undefined {
     default:
       return undefined;
   }
+}
+
+function parseEmbedFrameHeight(value: unknown) {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0 || value > MAX_EMBED_FRAME_HEIGHT_PX) {
+    return undefined;
+  }
+
+  return value;
 }
